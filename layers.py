@@ -150,9 +150,11 @@ class diffPool(nn.Module):
 
         # Generate node embeddings & normalize (no pooling yet)
         x = self.gc(x, torch.tensor(adj, dtype = torch.float32))
-        x = self.bn(x)
+        if x.shape[0] > 1:
+            x = self.bn(x)
         # Create the assignment matrix (i.e. assign each node to a cluster)
         sl = self.gen_assign(x, adj)
+        # print("SL: ", sl)
         # Create the pooled feature matrix
         x = self.pool(x, sl)
         # Generate the new adjacency matrix
