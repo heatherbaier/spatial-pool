@@ -1,22 +1,10 @@
-from torchvision import models
-import landsat_prep as lp
-from PIL import Image
-import torch.nn as nn
-import geograph as gg
-import numpy as np
-import matplotlib
-import argparse
-import pickle
-import random
-import shutil
-import torch
-import time
-import os
-
-
-# GCN basic operation
 class GraphConv(nn.Module):
-    def __init__(self, input_dim, output_dim, bias=True):
+    """
+    GCN basic operation 
+    BATCHING: This should be resistent to batching because it's just creating the node embeddings
+    TO-DO: Double check the matmul stuff, this was taken from Ying's github so just confirm it's doing what you think
+    """
+    def __init__(self, input_dim, output_dim, bias = True):
         super(GraphConv, self).__init__()
         self.input_dim = input_dim
         self.output_dim = output_dim
@@ -34,8 +22,17 @@ class GraphConv(nn.Module):
         return y
 
 
-# Generate Assignment Matrix
 class GenAssign(nn.Module):
+    """
+    Generate Assignment Matrix S_l
+    BATCHING: You could batch this or not. 
+              1) Argument FOR batching: could pool features based on geography from other municiaplites.
+              2) Argument AGAINST batching: In repsonse to point above, that could be okay because we are still taking features by                   muni in the next layer   
+              - REGARDLESS: Make it clear which option you chose and why
+              - FOR NOW: No batching    
+              - YOU DECIDED AGAINST BECAUSE IT ACTUALLY SEEMS TO BE CLUSTERING BY MUNI WITHOUT BATCHING
+    TO-DO: Why did you take out the linear layer?
+    """
     def __init__(self, input_dim, num_clusters, bias=True):
         super(GenAssign, self).__init__()
         self.input_dim = input_dim
@@ -48,31 +45,67 @@ class GenAssign(nn.Module):
         # self.linear = torch.nn.Linear(input_dim, num_clusters)
         self.sm = torch.nn.Softmax(dim = 1)
 
-    def forward(self, x, adj):
-        y = torch.matmul(adj, x)
-        y = torch.matmul(y, self.weight)
-        if self.bias is not None:
-            y = y + self.bias
-        # y = self.linear(y)
-        y = self.sm(y)
-        _, i = torch.max(y, 1)
-        return i
+    def forward(self, x, adj, batch):
+
+        batch_ids = torch.unique(batch)
+        a = 1
+
+        for i in batch_ids:
+
+            batch_indexes = torch.nonzero(batch == i, as_tuple = True)[0]
+            min_index, max_index = torch.min(batch_indexes), torch.max(batch_indexes) + 1
+            batch_x = torch.index_select(x, 0, batch_indexes)
+            batch_adj = adj[min_index:max_index, min_index:max_index]
+
+            y = torch.matmul(batch_adj, batch_x)
+            y = torch.matmul(y, self.weight)
+            if self.bias is not None:
+                y = y + self.bias
+            # y = self.linear(y)
+            y = self.sm(y)
+            _, i = torch.max(y, 1)
+
+            if a == 1:
+                out = i
+            else:
+                out = torch.cat((out, i))
+            a += 1
+
+        return out
 
 
-# Pool based on clusters
 class PoolClusters(nn.Module):
+    """
+    Pool based on clusters and assignment matrix (S_l) created in GenAssign
+    BATCHING: This definitley needs to be batched
+    """
     def __init__(self):
         super(PoolClusters, self).__init__()
 
-    def forward(self, x, sl):
+    def forward(self, x, sl, batch):
+
         cluster_ids = torch.unique(sl)
-        for cluster in cluster_ids:
-            indices = torch.nonzero(sl == cluster, as_tuple = True)[0]
-            cluster_mean = torch.mean(torch.index_select(x, 0, indices), dim = 0).unsqueeze(0)
-            try:
-                out = torch.cat((out, cluster_mean))
-            except Exception as e:
-                out = cluster_mean
+        batch_ids = torch.unique(batch)
+        a = 1
+
+        for i in batch_ids:
+
+            batch_indexes = torch.nonzero(batch == i, as_tuple = True)[0]
+            batch_x = torch.index_select(x, 0, batch_indexes)
+
+            for cluster in cluster_ids:
+
+                indices = torch.nonzero(sl == cluster, as_tuple = True)[0]
+                min_index, max_index = torch.min(batch_indexes), torch.max(batch_indexes)
+                indices = torch.unique(torch.clip(indices, min = min_index, max = max_index))
+                test_mean = torch.mean(torch.index_select(x, 0, indices), dim = 0).unsqueeze(0)
+                
+                if a == 1:
+                    out = test_mean
+                else:
+                    out = torch.cat((out, test_mean))
+                a += 1
+
         return out
 
 
